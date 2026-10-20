@@ -1,0 +1,126 @@
+From c594ef1bf1965f1dc1310c23736884ce13af7f09 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 17:33:57 +0200
+Subject: [PATCH 5/6] goodixtls53xd: Don't calibrate with a finger on the
+ sensor
+
+During an enrollment the next scan starts as soon as the finger is seen
+lifted. A finger put back quickly ended up in the background: lifting it
+then looked like a press, finger-free images were enrolled, and the scan
+eventually waited forever for the finger to be lifted.
+
+Check the calibration frames: without finger the detection frame median is
+~3770 and no calibration pixel is 0; with a finger the median is below ~920
+and almost all calibration pixels are 0. Calibrate again until it's empty.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/drivers/goodixtls/goodix53xd.c | 64 +++++++++++++++++++++---
+ 1 file changed, 56 insertions(+), 8 deletions(-)
+
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.c b/libfprint/drivers/goodixtls/goodix53xd.c
+index 63eca4a..dfde3e9 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.c
++++ b/libfprint/drivers/goodixtls/goodix53xd.c
+@@ -61,6 +61,10 @@
+ // calibration offset.
+ #define GOODIX53XD_DETECT_DAC_STEP 20
+ #define GOODIX53XD_CALIB_DAC_STEP 40
++// Finger-free checks of the calibration frames: median of the detection
++// frame above this level, and few zeros in the calibration frame
++#define GOODIX53XD_EMPTY_MIN_LEVEL 2500
++#define GOODIX53XD_EMPTY_MAX_ZERO_PERCENT 5
+ // Finger detection polls images: the FDT thresholds are sensor specific and
+ // the hardcoded ones trigger without finger on other sensors
+ #define GOODIX53XD_POLL_DELAY 100 // ms between two polled frames
+@@ -718,6 +722,15 @@ static void dump_press(FpiDeviceGoodixTls53XD* self, FpImage* img)
+     self->dump_press++;
+ }
+ 
++static gboolean in_image(int i)
++{
++    const int x = i % GOODIX53XD_WIDTH;
++    const int y = i / GOODIX53XD_WIDTH;
++
++    return x >= GOODIX53XD_BORDER && x < GOODIX53XD_WIDTH - GOODIX53XD_BORDER &&
++           y >= GOODIX53XD_BORDER && y < GOODIX53XD_HEIGHT - GOODIX53XD_BORDER;
++}
++
+ /**
+  * @brief Background at the finger DAC from the two calibration frames
+  * @details The DAC shifts every pixel linearly, so the value at the finger
+@@ -736,14 +749,9 @@ static void extrapolate_background(FpiDeviceGoodixTls53XD* self)
+         const int value =
+             detect + (detect - calib) * GOODIX53XD_DETECT_DAC_STEP / span;
+ 
+-        // The cropped border is often at 0 on the calibration frame
+-        const int x = i % GOODIX53XD_WIDTH;
+-        const int y = i / GOODIX53XD_WIDTH;
+-        const gboolean in_image =
+-            x >= GOODIX53XD_BORDER && x < GOODIX53XD_WIDTH - GOODIX53XD_BORDER &&
+-            y >= GOODIX53XD_BORDER && y < GOODIX53XD_HEIGHT - GOODIX53XD_BORDER;
+-
+-        if (in_image && (detect >= 0xfff || calib == 0)) {
++        // A finger on the sensor is rejected by calibration_is_empty(), this
++        // only catches a DAC offset leaving pixels saturated
++        if (in_image(i) && detect >= 0xfff) {
+             saturated++;
+         }
+         self->empty_img[i] = CLAMP(value, 0, 0xffff);
+@@ -755,6 +763,34 @@ static void extrapolate_background(FpiDeviceGoodixTls53XD* self)
+     }
+ }
+ 
++/**
++ * @brief Whether the calibration frames were taken without finger
++ * @details Without finger, the detection frame median is ~3770 and no pixel
++ * of the calibration frame is 0. With a finger, the median is below ~920 and
++ * almost every calibration pixel is 0.
++ *
++ * @param self
++ */
++static gboolean calibration_is_empty(FpiDeviceGoodixTls53XD* self)
++{
++    guint above = 0;
++    guint zeros = 0;
++
++    for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
++        if (!in_image(i)) {
++            continue;
++        }
++        above += self->detect_img[i] >= GOODIX53XD_EMPTY_MIN_LEVEL;
++        zeros += self->calib_img[i] == 0;
++    }
++
++    fp_dbg("Calibration: %u%% above %d, %u%% at 0",
++           above * 100 / GOODIX53XD_IMG_SIZE, GOODIX53XD_EMPTY_MIN_LEVEL,
++           zeros * 100 / GOODIX53XD_IMG_SIZE);
++    return above * 2 > GOODIX53XD_IMG_SIZE &&
++           zeros * 100 < GOODIX53XD_IMG_SIZE * GOODIX53XD_EMPTY_MAX_ZERO_PERCENT;
++}
++
+ static void save_frame(FpiDeviceGoodixTls53XD* self, guint8* raw)
+ {
+     Goodix53xdPix* frame = malloc(GOODIX53XD_FRAME_SIZE * sizeof(Goodix53xdPix));
+@@ -793,6 +829,18 @@ static void scan_on_read_img(FpDevice* dev, guint8* data, guint16 len,
+ 
+         if (self->background_frames == 1) {
+             decode_frame(self->calib_img, data);
++
++            // A finger still on the sensor would become the background:
++            // lifting it would then look like a press
++            if (!calibration_is_empty(self)) {
++                fp_dbg("Finger on the sensor during calibration, retrying");
++                self->background_frames = 0;
++                self->dac_offset =
++                    self->finger_dac_offset + GOODIX53XD_DETECT_DAC_STEP;
++                fpi_ssm_jump_to_state(ssm, SCAN_STAGE_WAIT);
++                return;
++            }
++
+             self->background_frames++;
+             extrapolate_background(self);
+             self->dac_offset =
+-- 
+2.53.0
+

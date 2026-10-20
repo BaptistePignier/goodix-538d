@@ -1,0 +1,59 @@
+From d28820b25a68aa827f6753fb9facbd7ea6edf61b Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 17:27:58 +0200
+Subject: [PATCH 3/6] sigfm: Fix match deduplication and loosen the ratio test
+
+match::operator< only compared p1.y (its second clause can never be true),
+so the std::set of matches kept a single match per row of the verified
+image and dropped most genuine correspondences on small images.
+
+Raise Lowe's ratio from 0.75 to 0.8: fingerprint ridges are periodic, so
+the second best descriptor is often close to the best one.
+
+On 30 genuine and 25 impostor presses of a goodix 27c6:538d, impostors stay
+at a score of 3 or less while more genuine presses match.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/sigfm/sigfm.cpp | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/libfprint/sigfm/sigfm.cpp b/libfprint/sigfm/sigfm.cpp
+index 0781299..40b17e8 100644
+--- a/libfprint/sigfm/sigfm.cpp
++++ b/libfprint/sigfm/sigfm.cpp
+@@ -36,6 +36,7 @@
+ #include <string>
+ 
+ #include <opencv2/opencv.hpp>
++#include <tuple>
+ #include <vector>
+ 
+ namespace bin {
+@@ -60,7 +61,9 @@ struct deserializer<SigfmImgInfo> : public std::true_type {
+ } // namespace bin
+ 
+ namespace {
+-constexpr auto distance_match = 0.75;
++// Lowe's ratio test. Ridges are periodic, so the second best match is often
++// close to the best one: 0.8 keeps more genuine matches on small sensors.
++constexpr auto distance_match = 0.8;
+ constexpr auto length_match = 0.05;
+ constexpr auto angle_match = 0.05;
+ constexpr auto min_match = 5;
+@@ -75,8 +78,10 @@ struct match {
+     }
+     bool operator<(const match& right) const
+     {
+-        return (this->p1.y < right.p1.y) ||
+-               ((this->p1.y < right.p1.y) && this->p1.x < right.p1.x);
++        // Compare every coordinate: comparing only p1.y made the std::set
++        // keep a single match per row of the verified image
++        return std::tie(this->p1.x, this->p1.y, this->p2.x, this->p2.y) <
++               std::tie(right.p1.x, right.p1.y, right.p2.x, right.p2.y);
+     }
+ };
+ struct angle {
+-- 
+2.53.0
+

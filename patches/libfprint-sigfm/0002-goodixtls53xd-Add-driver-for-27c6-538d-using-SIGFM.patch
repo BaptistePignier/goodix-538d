@@ -1,7 +1,7 @@
 From 6b114eac3cd70f6cf4a8d96403ea3ee52d0abc34 Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 16:41:42 +0200
-Subject: [PATCH 2/2] goodixtls53xd: Add driver for 27c6:538d using SIGFM
+Subject: [PATCH 2/6] goodixtls53xd: Add driver for 27c6:538d using SIGFM
 
 Driver and goodixtls helpers come from infinytum/libfprint (unstable
 branch) with the capture fixes of the goodix53xd branch there. The driver

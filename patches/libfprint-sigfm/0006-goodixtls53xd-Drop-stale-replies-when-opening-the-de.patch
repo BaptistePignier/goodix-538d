@@ -1,0 +1,76 @@
+From a232056c53af10e8231678a4bf1e3d46ebfdd776 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 17:36:44 +0200
+Subject: [PATCH 6/6] goodixtls53xd: Drop stale replies when opening the device
+
+A program interrupted during a scan may leave image or TLS data in the
+reader, which the next activation would take for its command replies.
+Read until it times out when opening, like empty_buffer() in
+goodix-fp-dump. Also report goodix_dev_init() errors: the return value
+was tested the wrong way round.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/drivers/goodixtls/goodix53xd.c | 31 +++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.c b/libfprint/drivers/goodixtls/goodix53xd.c
+index dfde3e9..d382639 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.c
++++ b/libfprint/drivers/goodixtls/goodix53xd.c
+@@ -80,6 +80,10 @@
+ #define GOODIX53XD_ENROLL_STAGES 20
+ #define GOODIX53XD_ACTIVATE_ATTEMPTS 3
+ #define GOODIX53XD_ACTIVATE_RETRY_DELAY 200 // ms
++// Stale replies dropped when opening, see drain_input()
++#define GOODIX53XD_DRAIN_MAX_READS 64
++#define GOODIX53XD_DRAIN_SIZE 0x10000
++#define GOODIX53XD_DRAIN_TIMEOUT 100 // ms
+ #define GOODIX53XD_STRETCH_PERCENTILE 2
+ // The outermost pixels have extreme values, they are cropped from the image
+ #define GOODIX53XD_BORDER 2
+@@ -1119,15 +1123,40 @@ static void scan_start(FpiDeviceGoodixTls53XD* dev)
+ 
+ // ---- DEV SECTION START ----
+ 
++/**
++ * @brief Drops replies left by a previous process
++ * @details A program interrupted during a scan leaves image or TLS data in
++ * the reader, which the next activation takes for its command replies. Same
++ * as empty_buffer() in goodix-fp-dump: read until it times out.
++ *
++ * @param dev
++ */
++static void drain_input(FpDevice* dev)
++{
++    for (int i = 0; i != GOODIX53XD_DRAIN_MAX_READS; ++i) {
++        g_autoptr(FpiUsbTransfer) transfer = fpi_usb_transfer_new(dev);
++        g_autoptr(GError) error = NULL;
++
++        fpi_usb_transfer_fill_bulk(transfer, GOODIX_53XD_EP_IN,
++                                   GOODIX53XD_DRAIN_SIZE);
++        if (!fpi_usb_transfer_submit_sync(transfer, GOODIX53XD_DRAIN_TIMEOUT,
++                                          &error)) {
++            return;
++        }
++        fp_dbg("Dropped %zd stale bytes", transfer->actual_length);
++    }
++}
++
+ static void dev_init(FpImageDevice *img_dev) {
+   FpDevice *dev = FP_DEVICE(img_dev);
+   GError *error = NULL;
+ 
+-  if (goodix_dev_init(dev, &error)) {
++  if (!goodix_dev_init(dev, &error)) {
+     fpi_image_device_open_complete(img_dev, error);
+     return;
+   }
+ 
++  drain_input(dev);
+   fpi_image_device_open_complete(img_dev, NULL);
+ }
+ 
+-- 
+2.53.0
+
