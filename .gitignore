@@ -1,0 +1,7 @@
+# Clones published separately or fetched by the user
+/goodix-fp-dump/
+/libfprint-53xd/
+/libfprint-sigfm/
+/.venv/
+__pycache__/
+*.pgm

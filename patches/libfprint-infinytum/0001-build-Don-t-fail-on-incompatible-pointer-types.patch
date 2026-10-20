@@ -1,0 +1,28 @@
+From bce1dc372773ecc26e0d89fa0bac220d622dea95 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 16:41:42 +0200
+Subject: [PATCH 1/2] build: Don't fail on incompatible pointer types
+
+GCC 14 turned -Wincompatible-pointer-types into an error, which breaks the
+goodixtls helpers. Same workaround as the libfprint-goodix-521d AUR package.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ meson.build | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/meson.build b/meson.build
+index ba3a6ca..efb9012 100644
+--- a/meson.build
++++ b/meson.build
+@@ -20,6 +20,7 @@ glib_min_version = '2.56'
+ glib_version_def = 'GLIB_VERSION_@0@_@1@'.format(
+     glib_min_version.split('.')[0], glib_min_version.split('.')[1])
+ common_cflags = cc.get_supported_arguments([
++    '-Wno-incompatible-pointer-types',
+     '-Wall',
+     '-Wcast-align',
+     '-Wformat-nonliteral',
+-- 
+2.53.0
+

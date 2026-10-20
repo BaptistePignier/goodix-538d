@@ -1,0 +1,610 @@
+From 6f54d7ec8f42839ec6701c30b0d37873b5d6620d Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 16:41:42 +0200
+Subject: [PATCH 2/2] goodixtls53xd: Make captures usable on 27c6:538d
+
+- Average the frames of a press instead of assembling them like a swipe:
+  the 53xd is a press sensor and every frame covers the same area.
+- Capture a background frame without finger before each scan and subtract
+  it from the press (the previous subtraction code was disabled and wrong).
+- Remove each row mean, crop a 2 pixel border and stretch between the 2nd
+  and 98th percentiles: removes horizontal bands and border outliers.
+- Write 05 03 to sensor register 0x022c as the Python driver does, the
+  guint16 brace initializer sent 05 00.
+- Detect the finger by polling frames against the background instead of
+  FDT down: the FDT thresholds are hardcoded from another sensor and fired
+  without finger. Wait for the finger to be lifted before reporting it.
+- Use the OTP calibration bytes in the FDT mode command too.
+- Complete the scan state machine before reporting finger off, so the next
+  scan isn't lost (double free on close), and stop polling on deactivate.
+- Optionally dump the produced image to $GOODIX53XD_DUMP_DIR for debugging.
+
+Capture, enroll and finger detection work. NBIS finds only 1 or 2 minutiae
+per 60x76 image, so verification doesn't match.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/drivers/goodixtls/goodix53xd.c | 404 ++++++++++++++++-------
+ libfprint/drivers/goodixtls/goodix53xd.h |   2 -
+ 2 files changed, 277 insertions(+), 129 deletions(-)
+
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.c b/libfprint/drivers/goodixtls/goodix53xd.c
+index 42f52b1..05caa42 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.c
++++ b/libfprint/drivers/goodixtls/goodix53xd.c
+@@ -50,10 +50,30 @@
+ // extra end
+ #define GOODIX53XD_RAW_FRAME_SIZE                                               \
+     (GOODIX53XD_HEIGHT * GOODIX53XD_SCAN_WIDTH) / 4 * 6
+-#define GOODIX53XD_CAP_FRAMES 10 // Number of frames we capture per swipe
++#define GOODIX53XD_CAP_FRAMES 3 // Number of frames averaged per press
++// Offset added after background subtraction so pixels stay unsigned
++#define GOODIX53XD_BG_OFFSET 0x1000
++// Finger detection polls images: the FDT thresholds are sensor specific and
++// the hardcoded ones trigger without finger on other sensors
++#define GOODIX53XD_POLL_DELAY 100 // ms between two polled frames
++#define GOODIX53XD_FINGER_NOISE_FACTOR 4
++#define GOODIX53XD_FINGER_MIN_DELTA 16 // 12 bit units
++#define GOODIX53XD_STRETCH_PERCENTILE 2
++// The outermost pixels have extreme values, they are cropped from the image
++#define GOODIX53XD_BORDER 2
++#define GOODIX53XD_IMG_WIDTH (GOODIX53XD_WIDTH - 2 * GOODIX53XD_BORDER)
++#define GOODIX53XD_IMG_HEIGHT (GOODIX53XD_HEIGHT - 2 * GOODIX53XD_BORDER)
++#define GOODIX53XD_IMG_SIZE (GOODIX53XD_IMG_WIDTH * GOODIX53XD_IMG_HEIGHT)
+ 
+ typedef unsigned short Goodix53xdPix;
+ 
++typedef enum {
++    GOODIX53XD_CAPTURE_BACKGROUND,
++    GOODIX53XD_CAPTURE_WAIT_FINGER_ON,
++    GOODIX53XD_CAPTURE_PRESS,
++    GOODIX53XD_CAPTURE_WAIT_FINGER_OFF,
++} Goodix53xdCaptureMode;
++
+ struct _FpiDeviceGoodixTls53XD {
+   FpiDeviceGoodixTls parent;
+ 
+@@ -62,6 +82,14 @@ struct _FpiDeviceGoodixTls53XD {
+   GSList* frames;
+ 
+   Goodix53xdPix empty_img[GOODIX53XD_FRAME_SIZE];
++
++  Goodix53xdCaptureMode capture_mode;
++  guint background_frames;
++  guint finger_threshold;
++
++  FpiSsm* scan_ssm;
++  gboolean polling;
++  gboolean deactivating;
+ };
+ 
+ G_DECLARE_FINAL_TYPE(FpiDeviceGoodixTls53XD, fpi_device_goodixtls53xd, FPI,
+@@ -345,7 +373,8 @@ static void activate_complete(FpiSsm* ssm, FpDevice* dev, GError* error)
+ // ---- SCAN SECTION START ----
+ 
+ enum SCAN_STAGES {
+-    SCAN_STAGE_SWITCH_TO_FDT_DOWN,
++    SCAN_STAGE_CALIBRATE,
++    SCAN_STAGE_WAIT,
+     SCAN_STAGE_SWITCH_TO_FDT_MODE,
+     SCAN_STAGE_GET_IMG,
+ 
+@@ -362,13 +391,6 @@ static void check_none_cmd(FpDevice* dev, guint8* data, guint16 len,
+     fpi_ssm_next_state(ssm);
+ }
+ 
+-static unsigned char get_pix(struct fpi_frame_asmbl_ctx* ctx,
+-                             struct fpi_frame* frame, unsigned int x,
+-                             unsigned int y)
+-{
+-    return frame->data[x + y * GOODIX53XD_WIDTH];
+-}
+-
+ // Bitdepth is 12, but we have to fit it in a byte
+ static unsigned char squash(int v) { return v / 16; }
+ 
+@@ -414,86 +436,148 @@ static void squash_frame(Goodix53xdPix* frame, guint8* squashed)
+         squashed[i] = squash(frame[i]);
+     }
+ }
++static int goodix_cmp_int(const void* a, const void* b)
++{
++    return *(const int*) a - *(const int*) b;
++}
++
+ /**
+- * @brief Squashes the 12 bit pixels of a raw frame into the 4 bit pixels used
+- * by libfprint.
+- * @details Borrowed from the elan driver. We reduce frames to
+- * within the max and min.
++ * @brief Squashes the 12 bit pixels of a frame into the 8 bit pixels used
++ * by libfprint, cropping GOODIX53XD_BORDER pixels on each side.
++ * @details Each row gets its mean removed, the sensor has a row dependent
++ * offset that shows as horizontal bands. The result is stretched between the
++ * GOODIX53XD_STRETCH_PERCENTILE low and high percentiles, so that a few
++ * extreme pixels don't flatten the ridges.
+  *
+  * @param frame
+- * @param squashed
++ * @param squashed GOODIX53XD_IMG_SIZE pixels
+  */
+-static void squash_frame_linear(Goodix53xdPix* frame, guint8* squashed)
++static void squash_frame_rows(Goodix53xdPix* frame, guint8* squashed)
+ {
+-    Goodix53xdPix min = 0xffff;
+-    Goodix53xdPix max = 0;
++    int values[GOODIX53XD_IMG_SIZE];
++    int sorted[GOODIX53XD_IMG_SIZE];
+ 
+-    for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
+-        const Goodix53xdPix pix = frame[i];
+-        if (pix < min) {
+-            min = pix;
++    for (int y = 0; y != GOODIX53XD_IMG_HEIGHT; ++y) {
++        const Goodix53xdPix* row = frame +
++                                   (y + GOODIX53XD_BORDER) * GOODIX53XD_WIDTH +
++                                   GOODIX53XD_BORDER;
++        int sum = 0;
++
++        for (int x = 0; x != GOODIX53XD_IMG_WIDTH; ++x) {
++            sum += row[x];
+         }
+-        if (pix > max) {
+-            max = pix;
++        for (int x = 0; x != GOODIX53XD_IMG_WIDTH; ++x) {
++            values[x + y * GOODIX53XD_IMG_WIDTH] =
++                row[x] - sum / GOODIX53XD_IMG_WIDTH;
+         }
+     }
+ 
+-    for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
+-        const Goodix53xdPix pix = frame[i];
+-        if (pix - min == 0 || max - min == 0) {
++    memcpy(sorted, values, sizeof(values));
++    qsort(sorted, GOODIX53XD_IMG_SIZE, sizeof(int), goodix_cmp_int);
++    const int low =
++        sorted[GOODIX53XD_IMG_SIZE * GOODIX53XD_STRETCH_PERCENTILE / 100];
++    const int high = sorted[GOODIX53XD_IMG_SIZE *
++                            (100 - GOODIX53XD_STRETCH_PERCENTILE) / 100];
++
++    for (int i = 0; i != GOODIX53XD_IMG_SIZE; ++i) {
++        if (high == low) {
+             squashed[i] = 0;
++            continue;
+         }
+-        else {
+-            squashed[i] = (pix - min) * 0xff / (max - min);
+-        }
++        squashed[i] = CLAMP((values[i] - low) * 0xff / (high - low), 0, 0xff);
+     }
+ }
+ 
+ /**
+  * @brief Subtracts the background from the frame
++ * @details The difference is shifted by GOODIX53XD_BG_OFFSET so it stays
++ * unsigned, squash_frame_rows() then stretches it to 8 bits.
+  *
+  * @param frame
+  * @param background
+  */
+-static gboolean postprocess_frame(Goodix53xdPix frame[GOODIX53XD_FRAME_SIZE],
+-                                  Goodix53xdPix background[GOODIX53XD_FRAME_SIZE])
++static void postprocess_frame(Goodix53xdPix frame[GOODIX53XD_FRAME_SIZE],
++                              Goodix53xdPix background[GOODIX53XD_FRAME_SIZE])
+ {
+-    int sum = 0;
+     for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
+-        Goodix53xdPix* og_px = frame + i;
+-        Goodix53xdPix bg_px =  background[i];
+-            if (bg_px > *og_px) {
+-                *og_px = 0;
+-            }
+-            else {
+-                *og_px -= bg_px;
+-            }
+-            *og_px = MAX(bg_px - *og_px, 0);
+-            *og_px = MAX(*og_px - bg_px, 0);
+-            sum += *og_px;
+-            
++        frame[i] = frame[i] + GOODIX53XD_BG_OFFSET - background[i];
+     }
+-    if (sum == 0) {
+-        fp_warn("frame darker than background, finger on scanner during "
+-                "calibration?");
++}
++
++/**
++ * @brief Averages the captured frames of a single press into one frame
++ *
++ * @param frames
++ * @param averaged
++ */
++static void average_frames(GSList* frames,
++                           Goodix53xdPix averaged[GOODIX53XD_FRAME_SIZE])
++{
++    guint32 sum[GOODIX53XD_FRAME_SIZE] = {0};
++    const guint count = g_slist_length(frames);
++
++    for (GSList* l = frames; l != NULL; l = l->next) {
++        const Goodix53xdPix* frame = l->data;
++        for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
++            sum[i] += frame[i];
++        }
++    }
++
++    for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
++        averaged[i] = sum[i] / count;
+     }
+-    return sum != 0;
+ }
+ 
+-typedef struct _frame_processing_info {
+-    FpiDeviceGoodixTls53XD* dev;
+-    GSList** frames;
++/**
++ * @brief Mean absolute difference between two frames
++ *
++ * @param a
++ * @param b
++ */
++static guint frame_delta(const Goodix53xdPix a[GOODIX53XD_FRAME_SIZE],
++                         const Goodix53xdPix b[GOODIX53XD_FRAME_SIZE])
++{
++    guint64 sum = 0;
++
++    for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
++        sum += ABS((int) a[i] - (int) b[i]);
++    }
+ 
+-} frame_processing_info;
++    return sum / GOODIX53XD_FRAME_SIZE;
++}
+ 
+-static void process_frame(Goodix53xdPix* raw_frame, frame_processing_info* info)
++/**
++ * @brief Saves the image as PGM in $GOODIX53XD_DUMP_DIR, for debugging only
++ *
++ * @param img
++ */
++static void dump_image(FpImage* img)
+ {
+-    struct fpi_frame* frame =
+-        g_malloc(GOODIX53XD_FRAME_SIZE + sizeof(struct fpi_frame));
+-    //postprocess_frame(raw_frame, info->dev->empty_img);
+-    squash_frame_linear(raw_frame, frame->data);
++    static guint count = 0;
++    const gchar* dir = g_getenv("GOODIX53XD_DUMP_DIR");
+ 
+-    *(info->frames) = g_slist_append(*(info->frames), frame);
++    if (dir == NULL) {
++        return;
++    }
++
++    g_autofree gchar* path =
++        g_strdup_printf("%s/goodix53xd-%03u.pgm", dir, count++);
++    g_autofree gchar* header =
++        g_strdup_printf("P5\n%u %u\n255\n", img->width, img->height);
++    const gsize header_len = strlen(header);
++    const gsize data_len = img->width * img->height;
++    g_autofree guint8* pgm = g_malloc(header_len + data_len);
++
++    memcpy(pgm, header, header_len);
++    memcpy(pgm + header_len, img->data, data_len);
++
++    g_autoptr(GError) error = NULL;
++    if (!g_file_set_contents(path, (gchar*) pgm, header_len + data_len,
++                             &error)) {
++        fp_warn("Failed to dump image to %s: %s", path, error->message);
++        return;
++    }
++    fp_dbg("Image dumped to %s", path);
+ }
+ 
+ static void save_frame(FpiDeviceGoodixTls53XD* self, guint8* raw)
+@@ -513,39 +597,88 @@ static void scan_on_read_img(FpDevice* dev, guint8* data, guint16 len,
+ 
+ 
+     FpiDeviceGoodixTls53XD* self = FPI_DEVICE_GOODIXTLS53XD(dev);
+-    save_frame(self, data);
+-    if (g_slist_length(self->frames) <= GOODIX53XD_CAP_FRAMES) {
+-        fpi_ssm_jump_to_state(ssm, SCAN_STAGE_SWITCH_TO_FDT_MODE);
+-    }
+-    else {
+-        GSList* raw_frames = g_slist_nth(self->frames, 1);
++    FpImageDevice* img_dev = FP_IMAGE_DEVICE(dev);
++    Goodix53xdPix frame[GOODIX53XD_FRAME_SIZE];
++    guint delta;
++
++    switch (self->capture_mode) {
++    case GOODIX53XD_CAPTURE_BACKGROUND:
++        // Two frames without finger: the first one is the background
++        // subtracted from every press, their difference is the sensor noise
++        if (self->background_frames++ == 0) {
++            decode_frame(self->empty_img, data);
++            fpi_ssm_jump_to_state(ssm, SCAN_STAGE_SWITCH_TO_FDT_MODE);
++            return;
++        }
+ 
+-        FpImageDevice* img_dev = FP_IMAGE_DEVICE(dev);
+-        struct fpi_frame_asmbl_ctx assembly_ctx;
+-        assembly_ctx.frame_width = GOODIX53XD_WIDTH;
+-        assembly_ctx.frame_height = GOODIX53XD_HEIGHT;
+-        assembly_ctx.image_width = GOODIX53XD_WIDTH*3;
+-        assembly_ctx.get_pixel = get_pix;
++        decode_frame(frame, data);
++        delta = frame_delta(frame, self->empty_img);
++        self->finger_threshold = MAX(delta * GOODIX53XD_FINGER_NOISE_FACTOR,
++                                     delta + GOODIX53XD_FINGER_MIN_DELTA);
++        fp_dbg("Background noise: %u, finger threshold: %u", delta,
++               self->finger_threshold);
+ 
+-        GSList* frames = NULL;
+-        frame_processing_info pinfo = {.dev = self, .frames = &frames};
++        self->capture_mode = GOODIX53XD_CAPTURE_WAIT_FINGER_ON;
++        fpi_ssm_jump_to_state(ssm, SCAN_STAGE_WAIT);
++        return;
++
++    case GOODIX53XD_CAPTURE_WAIT_FINGER_ON:
++        decode_frame(frame, data);
++        delta = frame_delta(frame, self->empty_img);
++
++        if (delta > self->finger_threshold) {
++            fp_dbg("Finger on, delta: %u", delta);
++            // This frame may show a finger still landing, it is not kept
++            fpi_image_device_report_finger_status(img_dev, TRUE);
++            self->capture_mode = GOODIX53XD_CAPTURE_PRESS;
++            fpi_ssm_jump_to_state(ssm, SCAN_STAGE_SWITCH_TO_FDT_MODE);
++            return;
++        }
++
++        fpi_ssm_jump_to_state(ssm, SCAN_STAGE_WAIT);
++        return;
++
++    case GOODIX53XD_CAPTURE_PRESS:
++        save_frame(self, data);
++        if (g_slist_length(self->frames) < GOODIX53XD_CAP_FRAMES) {
++            fpi_ssm_jump_to_state(ssm, SCAN_STAGE_SWITCH_TO_FDT_MODE);
++            return;
++        }
++
++        // The 53xd is a press sensor: the frames all cover the same area,
++        // so they are averaged instead of being assembled like a swipe
++        Goodix53xdPix averaged[GOODIX53XD_FRAME_SIZE];
+ 
+-        g_slist_foreach(raw_frames, (GFunc) process_frame, &pinfo);
+-        frames = g_slist_reverse(frames);
++        average_frames(self->frames, averaged);
++        postprocess_frame(averaged, self->empty_img);
+ 
+-        fpi_do_movement_estimation(&assembly_ctx, frames);
+-        FpImage* img = fpi_assemble_frames(&assembly_ctx, frames);
++        FpImage* img = fp_image_new(GOODIX53XD_IMG_WIDTH, GOODIX53XD_IMG_HEIGHT);
++        squash_frame_rows(averaged, img->data);
+ 
+-        g_slist_free_full(frames, g_free);
+         g_slist_free_full(self->frames, g_free);
+-        self->frames = g_slist_alloc();
++        self->frames = NULL;
+ 
++        dump_image(img);
+         fpi_image_device_image_captured(img_dev, img);
+ 
++        self->capture_mode = GOODIX53XD_CAPTURE_WAIT_FINGER_OFF;
++        fpi_ssm_jump_to_state(ssm, SCAN_STAGE_WAIT);
++        return;
++
++    case GOODIX53XD_CAPTURE_WAIT_FINGER_OFF:
++        decode_frame(frame, data);
++        delta = frame_delta(frame, self->empty_img);
+ 
+-        fpi_image_device_report_finger_status(img_dev, FALSE);
++        if (delta <= self->finger_threshold) {
++            fp_dbg("Finger off, delta: %u", delta);
++            // Complete first: reporting the finger off starts the next scan
++            fpi_ssm_mark_completed(ssm);
++            fpi_image_device_report_finger_status(img_dev, FALSE);
++            return;
++        }
+ 
+-        fpi_ssm_next_state(ssm);
++        fpi_ssm_jump_to_state(ssm, SCAN_STAGE_WAIT);
++        return;
+     }
+ }
+ 
+@@ -598,19 +731,21 @@ static void scan_get_img(FpDevice* dev, FpiSsm* ssm)
+     goodix_tls_read_image(dev, &payload, sizeof(payload), scan_on_read_img, ssm);
+ }
+ 
+-const guint8 fdt_switch_state_mode_53xd[] = {
++guint8 fdt_switch_state_mode_53xd[] = {
+     0x0d, 0x01, 0x28, 0x01, 0x22, 0x01, 0x28, 0x01,
+     0x24, 0x01, 0x91, 0x91, 0x8b, 0x8b, 0x96, 0x96,
+     0x91, 0x91, 0x98, 0x98, 0x90, 0x90, 0x92, 0x92,
+     0x88, 0x88, 0x00
+ };
+ 
+-guint8 fdt_switch_state_down_53xd[] = {
+-    0x8c, 0x01, 0x28, 0x01, 0x22, 0x01, 0x28, 0x01,
+-    0x24, 0x01, 0x91, 0x91, 0x8b, 0x8b, 0x96, 0x96,
+-    0x91, 0x91, 0x98, 0x98, 0x90, 0x90, 0x92, 0x92,
+-    0x88, 0x88, 0x00
+-};
++// FDT calibration values come from the OTP of each sensor
++static void set_fdt_otp(guint8* fdt, const guint8* otp)
++{
++    fdt[2] = otp[33];
++    fdt[4] = otp[41];
++    fdt[6] = otp[42];
++    fdt[8] = otp[43];
++}
+ 
+ static void scan_run_state(FpiSsm* ssm, FpDevice* dev)
+ {
+@@ -620,52 +755,42 @@ static void scan_run_state(FpiSsm* ssm, FpDevice* dev)
+ 
+     switch (fpi_ssm_get_cur_state(ssm)) {
+ 
++    case SCAN_STAGE_CALIBRATE:
++        // Capture frames without finger, using the same sequence as a
++        // finger frame (FDT mode, sensor register, image)
++        set_fdt_otp(fdt_switch_state_mode_53xd, self->otp);
++        self->capture_mode = GOODIX53XD_CAPTURE_BACKGROUND;
++        self->background_frames = 0;
++        fpi_ssm_jump_to_state(ssm, SCAN_STAGE_SWITCH_TO_FDT_MODE);
++        break;
++
++    case SCAN_STAGE_WAIT:
++        if (self->deactivating) {
++            fpi_ssm_mark_completed(ssm);
++            break;
++        }
++        self->polling = TRUE;
++        fpi_ssm_next_state_delayed(ssm, GOODIX53XD_POLL_DELAY);
++        break;
++
+     case SCAN_STAGE_SWITCH_TO_FDT_MODE:
+-        goodix_send_mcu_switch_to_fdt_mode(dev, (guint8*) fdt_switch_state_mode_53xd,
++        self->polling = FALSE;
++        goodix_send_mcu_switch_to_fdt_mode(dev, fdt_switch_state_mode_53xd,
+                                            sizeof(fdt_switch_state_mode_53xd), FALSE, NULL,
+                                            check_none_cmd, ssm);
+         break;
+ 
+-    case SCAN_STAGE_SWITCH_TO_FDT_DOWN:
+-        // FDT Down Cali
+-        fdt_switch_state_down_53xd[2] = self->otp[33];
+-        fdt_switch_state_down_53xd[4] = self->otp[41];
+-        fdt_switch_state_down_53xd[6] = self->otp[42];
+-        fdt_switch_state_down_53xd[8] = self->otp[43];
+-
+-        // First FDT down must not send a reply
+-        fdt_switch_state_down_53xd[26] = 0x00;
+-        goodix_send_mcu_switch_to_fdt_down(dev, (guint8*) fdt_switch_state_down_53xd,
+-                                           sizeof(fdt_switch_state_down_53xd), FALSE, NULL,
+-                                           receive_fdt_down_ack, ssm);
+-        break;
+     case SCAN_STAGE_GET_IMG:
+-        fpi_image_device_report_finger_status(img_dev, TRUE);
+-        guint16 payload = {0x05, 0x03};
+-        goodix_send_write_sensor_register(dev, 556, payload, write_sensor_complete, ssm);
++        // Register 0x022c, bytes 05 03 on the wire (little endian value)
++        goodix_send_write_sensor_register(dev, 0x022c, 0x0305, write_sensor_complete, ssm);
+         break;
+     }
+ }
+ 
+-static void receive_fdt_down_ack(FpDevice* dev, guint8* data, guint16 len,
+-                           gpointer ssm, GError* err)
+-{
+-    if (err) {
+-        fpi_ssm_mark_failed(ssm, err);
+-        return;
+-    }
+-
+-    // Second FDT down must send a response
+-    fdt_switch_state_down_53xd[26] = 0x01;
+-    goodix_send_mcu_switch_to_fdt_down(dev, (guint8*) fdt_switch_state_down_53xd,
+-                                        sizeof(fdt_switch_state_down_53xd), TRUE, NULL,
+-                                        check_none_cmd, ssm);
+-}
+-
+-static void write_sensor_complete(FpDevice *dev, gpointer user_data, GError *error) 
++static void write_sensor_complete(FpDevice *dev, gpointer user_data, GError *error)
+ {
+     if (error) {
+-        fp_err("failed to scan: %s (code: %d)", error->message, error->code);
++        fpi_ssm_mark_failed(user_data, error);
+         return;
+     }
+     scan_get_img(dev, user_data);
+@@ -673,8 +798,17 @@ static void write_sensor_complete(FpDevice *dev, gpointer user_data, GError *err
+ 
+ static void scan_complete(FpiSsm* ssm, FpDevice* dev, GError* error)
+ {
++    FpiDeviceGoodixTls53XD* self = FPI_DEVICE_GOODIXTLS53XD(dev);
++
++    // A new scan may already have started, only forget this one
++    if (self->scan_ssm == ssm) {
++        self->scan_ssm = NULL;
++        self->polling = FALSE;
++    }
++
+     if (error) {
+         fp_err("failed to scan: %s (code: %d)", error->message, error->code);
++        g_error_free(error);
+         return;
+     }
+     fp_dbg("finished scan");
+@@ -682,8 +816,9 @@ static void scan_complete(FpiSsm* ssm, FpDevice* dev, GError* error)
+ 
+ static void scan_start(FpiDeviceGoodixTls53XD* dev)
+ {
+-    fpi_ssm_start(fpi_ssm_new(FP_DEVICE(dev), scan_run_state, SCAN_STAGE_NUM),
+-                  scan_complete);
++    dev->deactivating = FALSE;
++    dev->scan_ssm = fpi_ssm_new(FP_DEVICE(dev), scan_run_state, SCAN_STAGE_NUM);
++    fpi_ssm_start(dev->scan_ssm, scan_complete);
+ }
+ 
+ // ---- SCAN SECTION END ----
+@@ -733,10 +868,25 @@ static void dev_change_state(FpImageDevice* img_dev, FpiImageDeviceState state)
+     }
+ }
+ 
+-static void goodix53xd_reset_state(FpiDeviceGoodixTls53XD* self) {}
++static void goodix53xd_reset_state(FpiDeviceGoodixTls53XD* self)
++{
++    // Drop frames of an interrupted press so they don't leak into the next one
++    g_slist_free_full(self->frames, g_free);
++    self->frames = NULL;
++}
+ 
+ static void dev_deactivate(FpImageDevice *img_dev) {
+     FpDevice* dev = FP_DEVICE(img_dev);
++    FpiDeviceGoodixTls53XD* self = FPI_DEVICE_GOODIXTLS53XD(img_dev);
++
++    // Stop the finger polling loop: right away if it is waiting for the next
++    // poll, otherwise at its next wait
++    self->deactivating = TRUE;
++    if (self->scan_ssm != NULL && self->polling) {
++        fpi_ssm_cancel_delayed_state_change(self->scan_ssm);
++        fpi_ssm_mark_completed(self->scan_ssm);
++    }
++
+     goodix_reset_state(dev);
+     GError* error = NULL;
+     goodix_shutdown_tls(dev, &error);
+@@ -748,7 +898,7 @@ static void dev_deactivate(FpImageDevice *img_dev) {
+ 
+ static void fpi_device_goodixtls53xd_init(FpiDeviceGoodixTls53XD* self)
+ {
+-    self->frames = g_slist_alloc();
++    self->frames = NULL;
+ }
+ 
+ static void fpi_device_goodixtls53xd_class_init(
+@@ -770,8 +920,8 @@ static void fpi_device_goodixtls53xd_class_init(
+ 
+   // TODO
+   img_dev_class->bz3_threshold = 24;
+-  img_dev_class->img_width = GOODIX53XD_WIDTH;
+-  img_dev_class->img_height = GOODIX53XD_HEIGHT;
++  img_dev_class->img_width = GOODIX53XD_IMG_WIDTH;
++  img_dev_class->img_height = GOODIX53XD_IMG_HEIGHT;
+ 
+   img_dev_class->img_open = dev_init;
+   img_dev_class->img_close = dev_deinit;
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.h b/libfprint/drivers/goodixtls/goodix53xd.h
+index 21ba6dd..bcbe5e9 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.h
++++ b/libfprint/drivers/goodixtls/goodix53xd.h
+@@ -68,5 +68,3 @@ static const FpIdEntry id_table[] = {
+ 
+ 
+ static void write_sensor_complete(FpDevice *dev, gpointer user_data, GError *error) ;
+-static void receive_fdt_down_ack(FpDevice* dev, guint8* data, guint16 len,
+-                           gpointer ssm, GError* err);
+-- 
+2.53.0
+
