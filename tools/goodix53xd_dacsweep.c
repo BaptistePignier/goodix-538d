@@ -31,7 +31,7 @@ static void on_capture_done(GObject* source, GAsyncResult* res, gpointer user_da
         fp_device_capture_finish(FP_DEVICE(source), res, &error);
 
     if (img != NULL) {
-        printf("    un doigt a été détecté, refaire sans toucher le capteur\n");
+        printf("    a finger was detected, run again without touching the sensor\n");
     }
     g_main_loop_quit(data->loop);
 }
@@ -53,24 +53,24 @@ int main(int argc, char** argv)
     g_autoptr(FpContext) ctx = fp_context_new();
     GPtrArray* devices = fp_context_get_devices(ctx);
     if (devices == NULL || devices->len == 0) {
-        fprintf(stderr, "Aucun lecteur trouvé (lancer avec sudo ?)\n");
+        fprintf(stderr, "No reader found (run with sudo?)\n");
         return EXIT_FAILURE;
     }
     FpDevice* dev = g_ptr_array_index(devices, 0);
 
     g_autoptr(GError) error = NULL;
     if (!fp_device_open_sync(dev, NULL, &error)) {
-        fprintf(stderr, "Ouverture impossible : %s\n", error->message);
+        fprintf(stderr, "Cannot open the reader: %s\n", error->message);
         return EXIT_FAILURE;
     }
 
-    printf("Ne touche pas le capteur pendant toute la mesure.\n");
+    printf("Do not touch the sensor during the whole measurement.\n");
     for (int arg = 2; arg < argc; ++arg) {
         g_autofree gchar* dir = g_build_filename(argv[1], argv[arg], NULL);
         g_mkdir_with_parents(dir, 0755);
         g_setenv("GOODIX53XD_DUMP_DIR", dir, TRUE);
         g_setenv("GOODIX53XD_DAC_OFFSET", argv[arg], TRUE);
-        printf("  décalage %s\n", argv[arg]);
+        printf("  offset %s\n", argv[arg]);
         fflush(stdout);
 
         SweepData data = {g_main_loop_new(NULL, FALSE), g_cancellable_new()};
@@ -82,6 +82,6 @@ int main(int argc, char** argv)
     }
 
     fp_device_close_sync(dev, NULL, NULL);
-    printf("Terminé.\n");
+    printf("Done.\n");
     return EXIT_SUCCESS;
 }

@@ -50,18 +50,18 @@ protocol.USBProtocol.write = _guarded_write
 def predict_branch(firmware: str, valid_psk: bool):
     if re.fullmatch(driver_53xd.TARGET_FIRMWARE, firmware):
         if valid_psk:
-            return "run_driver (capture d'images, aucune ecriture flash)"
-        return "ERASE app (0xa4) puis flash : PSK non nulle"
+            return "run_driver (image capture, nothing written to flash)"
+        return "ERASE app (0xa4) then flash: the PSK is not zero"
 
     if re.fullmatch(driver_53xd.VALID_FIRMWARE, firmware):
-        return "ERASE app (0xa4) puis flash 13016 : firmware d'origine detruit"
+        return "ERASE app (0xa4) then flash 13016: original firmware destroyed"
 
     if re.fullmatch(driver_53xd.IAP_FIRMWARE, firmware):
         if valid_psk:
-            return "mode IAP : flash 13016 (0xf0) sans reecriture de PSK"
-        return "mode IAP : ecriture PSK (0xe0) puis flash 13016 (0xf0)"
+            return "IAP mode: flash 13016 (0xf0) without rewriting the PSK"
+        return "IAP mode: write the PSK (0xe0) then flash 13016 (0xf0)"
 
-    return "'Invalid firmware' : le script s'arrete sans rien ecrire"
+    return "'Invalid firmware': the script stops without writing anything"
 
 
 def main():
@@ -74,8 +74,8 @@ def main():
     reply = device.preset_psk_read(0xbb020001, len(driver_53xd.PMK_HASH), 0)
     if not reply[0]:
         valid_psk = False
-        print("PSK: lecture refusee par le capteur "
-              "(run_538d.py leverait 'Failed to read PSK' ici)")
+        print("PSK: read refused by the sensor "
+              "(run_538d.py would raise 'Failed to read PSK' here)")
     else:
         valid_psk = reply[1] == 0xbb020001 and reply[2] == driver_53xd.PMK_HASH
         print(f"PSK flags: 0x{reply[1]:08x}")
@@ -86,9 +86,9 @@ def main():
     if "_APP_" in firmware:
         print(f"OTP: {device.read_otp().hex()}")
 
-    print(f"Branche prevue de run_538d.py : {predict_branch(firmware, valid_psk)}")
-    print(f"IAP attendu par le script : {driver_53xd.IAP_FIRMWARE} "
-          f"(non verifiable en mode APP)")
+    print(f"run_538d.py would do: {predict_branch(firmware, valid_psk)}")
+    print(f"IAP expected by the script: {driver_53xd.IAP_FIRMWARE} "
+          f"(cannot be checked in APP mode)")
 
 
 if __name__ == "__main__":

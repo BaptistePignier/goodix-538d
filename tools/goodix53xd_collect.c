@@ -60,17 +60,17 @@ int main(int argc, char** argv)
     g_autoptr(FpContext) ctx = fp_context_new();
     GPtrArray* devices = fp_context_get_devices(ctx);
     if (devices == NULL || devices->len == 0) {
-        fprintf(stderr, "Aucun lecteur trouvé (lancer avec sudo ?)\n");
+        fprintf(stderr, "No reader found (run with sudo?)\n");
         return EXIT_FAILURE;
     }
     FpDevice* dev = g_ptr_array_index(devices, 0);
 
     g_autoptr(GError) error = NULL;
     if (!fp_device_open_sync(dev, NULL, &error)) {
-        fprintf(stderr, "Ouverture impossible : %s\n", error->message);
+        fprintf(stderr, "Cannot open the reader: %s\n", error->message);
         return EXIT_FAILURE;
     }
-    printf("Lecteur : %s\n", fp_device_get_name(dev));
+    printf("Reader: %s\n", fp_device_get_name(dev));
 
     for (int arg = 2; arg < argc; ++arg) {
         g_auto(GStrv) parts = g_strsplit(argv[arg], ":", 2);
@@ -86,15 +86,15 @@ int main(int argc, char** argv)
         // The driver reads it before every dump
         g_setenv("GOODIX53XD_DUMP_DIR", label_dir, TRUE);
 
-        printf("\n=== Doigt « %s » : %u appuis. Entrée quand tu es prêt.\n",
+        printf("\n=== Finger \"%s\": %u presses. Press Enter when ready.\n",
                label, wanted);
         wait_enter();
 
         guint done = count_images(label_dir);
         guint device_errors = 0;
         while (done < wanted) {
-            printf("[%s %u/%u] Attends 1 seconde (image à vide), pose le "
-                   "doigt, puis retire-le.\n",
+            printf("[%s %u/%u] Wait 1 second (finger-free image), place the "
+                   "finger, then lift it.\n",
                    label, done + 1, wanted);
             fflush(stdout);
 
@@ -113,17 +113,17 @@ int main(int argc, char** argv)
                 // command after opening timing out) a few chances, but don't
                 // loop on a persistent one
                 if (++device_errors >= MAX_DEVICE_ERRORS) {
-                    fprintf(stderr, "Erreur du lecteur : %s\n", error->message);
+                    fprintf(stderr, "Reader error: %s\n", error->message);
                     fp_device_close_sync(dev, NULL, NULL);
                     return EXIT_FAILURE;
                 }
-                printf("    erreur du lecteur (%s), nouvel essai\n",
+                printf("    reader error (%s), trying again\n",
                        error->message);
                 g_usleep(2 * G_USEC_PER_SEC);
                 continue;
             }
             else if (error != NULL) {
-                printf("    refusé (%s), recommence\n", error->message);
+                printf("    rejected (%s), press again\n", error->message);
             }
             device_errors = 0;
             done = now;
@@ -132,6 +132,6 @@ int main(int argc, char** argv)
 
     g_clear_error(&error);
     fp_device_close_sync(dev, NULL, &error);
-    printf("\nTerminé. Données dans %s\n", out_dir);
+    printf("\nDone. Data in %s\n", out_dir);
     return EXIT_SUCCESS;
 }
