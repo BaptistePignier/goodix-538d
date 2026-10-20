@@ -5,3 +5,10 @@
 /.venv/
 __pycache__/
 *.pgm
+/tools/goodix53xd_collect
+/tools/sigfm_bench
+/dataset*/
+/tools/sigfm_matrix
+/tools/goodix53xd_dacsweep
+/dacsweep/
+/tools/sigfm_tune
