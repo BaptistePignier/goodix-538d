@@ -1,0 +1,53 @@
+From d2a29e2d6836c0c83631b6f23d43c47cfb75c749 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 18:39:32 +0200
+Subject: [PATCH 9/9] fp-device: Add FP_DEVICE_RETRY_TOO_FAST
+
+Added upstream after 1.94.5 and used by fprintd 1.94.5, which this fork
+is meant to be used with. Appended to keep the existing values.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/fp-device.h  | 3 +++
+ libfprint/fpi-device.c | 4 ++++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/libfprint/fp-device.h b/libfprint/fp-device.h
+index 9dda747..e82cb53 100644
+--- a/libfprint/fp-device.h
++++ b/libfprint/fp-device.h
+@@ -113,6 +113,8 @@ typedef enum {
+  * @FP_DEVICE_RETRY_REMOVE_FINGER: The scan did not succeed due to quality or
+  *   pressure problems; the user should remove their finger from the scanner
+  *   before retrying.
++ * @FP_DEVICE_RETRY_TOO_FAST: The scan did not succeed because the finger
++ *   swipe or touch was too fast.
+  *
+  * Error codes representing scan failures resulting in the user needing to
+  * retry.
+@@ -122,6 +124,7 @@ typedef enum {
+   FP_DEVICE_RETRY_TOO_SHORT,
+   FP_DEVICE_RETRY_CENTER_FINGER,
+   FP_DEVICE_RETRY_REMOVE_FINGER,
++  FP_DEVICE_RETRY_TOO_FAST,
+ } FpDeviceRetry;
+ 
+ /**
+diff --git a/libfprint/fpi-device.c b/libfprint/fpi-device.c
+index 1b9fa8f..5debb78 100644
+--- a/libfprint/fpi-device.c
++++ b/libfprint/fpi-device.c
+@@ -117,6 +117,10 @@ fpi_device_retry_new (FpDeviceRetry error)
+       msg = "Please try again after removing the finger first.";
+       break;
+ 
++    case FP_DEVICE_RETRY_TOO_FAST:
++      msg = "The finger was moved too fast, please try again.";
++      break;
++
+     default:
+       g_warning ("Unsupported error, returning general error instead!");
+       error = FP_DEVICE_RETRY_GENERAL;
+-- 
+2.53.0
+

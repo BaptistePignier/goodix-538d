@@ -1,7 +1,7 @@
 From a232056c53af10e8231678a4bf1e3d46ebfdd776 Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 17:36:44 +0200
-Subject: [PATCH 6/8] goodixtls53xd: Drop stale replies when opening the device
+Subject: [PATCH 6/9] goodixtls53xd: Drop stale replies when opening the device
 
 A program interrupted during a scan may leave image or TLS data in the
 reader, which the next activation would take for its command replies.

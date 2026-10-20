@@ -1,0 +1,58 @@
+From 41e07df60e7849632ea3ce1acefb4dd4ee33cbc6 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 18:39:32 +0200
+Subject: [PATCH] device: Save the print updated by a match
+
+libfprint image devices may add the matching scan to the matched print
+(template learning, needed by small sensors such as the goodix 27c6:538d
+with the SIGFM fork of libfprint). Save the print after a match on devices
+supporting print updates without their own storage, otherwise the learned
+images are lost when the print is loaded again.
+
+Also accept libfprint 1.94.5 with FP_DEVICE_RETRY_TOO_FAST: the SIGFM fork
+is based on it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ meson.build  | 4 +++-
+ src/device.c | 9 +++++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index eebea25..3007f7b 100644
+--- a/meson.build
++++ b/meson.build
+@@ -63,7 +63,9 @@ add_project_arguments(common_cflags, language: 'c')
+ 
+ host_system = host_machine.system()
+ glib_min_version = '2.64'
+-libfprint_min_version = '1.94.9'
++# 1.94.5 with FP_DEVICE_RETRY_TOO_FAST is enough: the goodix53xd SIGFM fork
++# of libfprint is based on 1.94.5
++libfprint_min_version = '1.94.5'
+ 
+ glib_version_def = 'GLIB_VERSION_@0@_@1@'.format(
+     glib_min_version.split('.')[0], glib_min_version.split('.')[1])
+diff --git a/src/device.c b/src/device.c
+index 4de4a10..d5ca44a 100644
+--- a/src/device.c
++++ b/src/device.c
+@@ -1552,6 +1552,15 @@ match_cb (FpDevice *device,
+   cancelled = g_cancellable_is_cancelled (priv->current_cancellable);
+   matched = match != NULL && cancelled == FALSE;
+ 
++  /* Drivers learning from matches add the scan to the matched print (image
++   * devices, with libfprint's sigfm_learn_max): save it, otherwise the
++   * learning is lost when the print is loaded again. */
++  if (matched &&
++      fp_device_has_feature (device, FP_DEVICE_FEATURE_UPDATE_PRINT) &&
++      !fp_device_has_feature (device, FP_DEVICE_FEATURE_STORAGE) &&
++      store.print_data_save (match) != 0)
++    g_warning ("Failed to save the print updated by the match");
++
+   report_verify_status (rdev, matched, error);
+ }
+ 
+-- 
+2.53.0
+

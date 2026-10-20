@@ -1,7 +1,7 @@
 From c594ef1bf1965f1dc1310c23736884ce13af7f09 Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 17:33:57 +0200
-Subject: [PATCH 5/8] goodixtls53xd: Don't calibrate with a finger on the
+Subject: [PATCH 5/9] goodixtls53xd: Don't calibrate with a finger on the
  sensor
 
 During an enrollment the next scan starts as soon as the finger is seen

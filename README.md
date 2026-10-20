@@ -10,7 +10,9 @@ moteur Goodix de Windows, **84 à 85 % des appuis naturels sont reconnus**
 après une vingtaine d'utilisations, et **aucun doigt étranger n'a été
 accepté** (0 sur 40 appuis réels, 0 sur 80 hors ligne). Ces mesures viennent
 de séances de quelques heures : seul un usage sur plusieurs jours dira si
-elles tiennent.
+elles tiennent. Installé avec un fprintd modifié pour conserver
+l'apprentissage (section 11), le lecteur a reconnu 18 appuis sur 18 et
+déverrouille l'écran de GNOME.
 
 Sans apprentissage, seuls 25 à 35 % des appuis étaient reconnus. Le capteur
 ne voit que 4 ou 5 crêtes presque parallèles : sur un tel motif, la position
@@ -31,8 +33,9 @@ utilisations qui le contourne.
 8. [Comparaison des empreintes](#8-comparaison-des-empreintes)
 9. [Apprentissage de l'empreinte](#9-apprentissage-de-lempreinte)
 10. [Résultats](#10-résultats)
-11. [Reproduire](#11-reproduire)
-12. [Contenu du dépôt](#12-contenu-du-dépôt)
+11. [Installation avec fprintd](#11-installation-avec-fprintd)
+12. [Reproduire](#12-reproduire)
+13. [Contenu du dépôt](#13-contenu-du-dépôt)
 
 ## 1. Audit de `run_538d.py`
 
@@ -286,7 +289,81 @@ Pour aller plus loin : un usage sur plusieurs jours, la calibration du gain
 par pixel, ou l'observation du pilote Windows (journaux et échanges USB
 dans une machine virtuelle) pour connaître ses réglages de capture.
 
-## 11. Reproduire
+## 11. Installation avec fprintd
+
+fprintd, le service qu'utilisent GNOME et PAM, ne réécrit jamais une
+empreinte après une vérification : l'apprentissage serait perdu à chaque
+chargement. Le [correctif de fprintd](patches/fprintd), sur la version
+1.94.5 d'Ubuntu 26.04, enregistre l'empreinte après chaque vérification
+réussie, pour les lecteurs à images sans stockage propre. Il accepte aussi
+libfprint 1.94.5, sur laquelle repose la branche SIGFM.
+
+L'installation se fait dans `/opt/fprint-538d`, sans toucher aux paquets
+Ubuntu. Dépendance supplémentaire : `libpolkit-gobject-1-dev`.
+
+```sh
+P=/opt/fprint-538d
+git clone https://github.com/BaptistePignier/goodix-538d.git
+git clone -b goodix53xd-sigfm https://github.com/BaptistePignier/libfprint.git
+git clone -b v1.94.5 https://gitlab.freedesktop.org/libfprint/fprintd.git
+git -C fprintd am "$PWD"/goodix-538d/patches/fprintd/*.patch
+
+meson setup libfprint/build-opt libfprint --prefix=$P -Ddrivers=goodixtls53xd \
+    -Dintrospection=false -Ddoc=false -Dgtk-examples=false \
+    -Dudev_rules=disabled -Dudev_hwdb=disabled
+ninja -C libfprint/build-opt
+PKG_CONFIG_PATH="$PWD"/libfprint/build-opt/meson-uninstalled \
+    meson setup fprintd/build fprintd --prefix=$P -Dpam=false -Dman=false \
+    -Dsystemd=false -Dgtk_doc=false -Dc_link_args=-Wl,-rpath,$P/lib/x86_64-linux-gnu
+ninja -C fprintd/build
+
+meson install -C libfprint/build-opt --destdir "$PWD"/stage
+meson install -C fprintd/build --destdir "$PWD"/stage
+sudo sh goodix-538d/tools/install-fprintd-538d.sh "$PWD"/stage
+```
+
+[`install-fprintd-538d.sh`](tools/install-fprintd-538d.sh) :
+- copie uniquement `/opt/fprint-538d`. L'installation de fprintd écrirait
+  aussi ses fichiers D-Bus et polkit dans `/usr/share`, par-dessus ceux du
+  paquet Ubuntu : ils sont identiques, à deux traductions près, et restent
+  ceux d'Ubuntu ;
+- crée `/etc/systemd/system/fprintd.service.d/goodix-538d.conf`, qui fait
+  démarrer notre fprintd à la place de `/usr/libexec/fprintd`. Le bac à
+  sable systemd d'Ubuntu est conservé, et le fichier de service D-Bus délègue
+  déjà à systemd ;
+- marque comme installées manuellement les bibliothèques OpenCV utilisées,
+  pour qu'un nettoyage des paquets de développement ne les retire pas.
+
+Ensuite :
+
+```sh
+fprintd-enroll -f right-index-finger    # 20 appuis répartis sur le doigt
+fprintd-verify -f right-index-finger
+```
+
+L'écran de verrouillage et de connexion de GNOME propose alors l'empreinte
+(fichier PAM `gdm-fingerprint` d'Ubuntu). `sudo` et les fenêtres
+d'administration ne l'utilisent pas : le profil `pam-auth-update` d'Ubuntu
+n'autorise qu'un essai (`max-tries=1`), et ce dépôt ne l'active pas.
+
+**Résultat** : 18 appuis de l'index reconnus sur 18 avec `fprintd-verify`,
+une demande de nouvel essai, 2 appuis d'un autre doigt refusés ;
+l'empreinte enregistrée par fprintd est passée d'environ 460 Ko à 1,2 Mo
+(images apprises).
+
+**Retour au fprintd d'Ubuntu :**
+
+```sh
+sudo rm /etc/systemd/system/fprintd.service.d/goodix-538d.conf
+sudo systemctl daemon-reload && sudo systemctl restart fprintd
+sudo rm -rf /opt/fprint-538d
+```
+
+Les empreintes restent dans `/var/lib/fprint` ; le fprintd d'Ubuntu ne gère
+pas ce lecteur. Rappel : la clé PSK du capteur est publique (section 1), un
+attaquant ayant un accès physique pourrait en théorie injecter des images.
+
+## 12. Reproduire
 
 Dépendances (Ubuntu 26.04) : `meson`, `ninja-build`, `gcc`, `libglib2.0-dev`,
 `libgusb-dev`, `libssl-dev`, `libopencv-dev`, `doctest-dev`.
@@ -321,13 +398,15 @@ python3 -m venv .venv && .venv/bin/pip install pyusb python-periphery spidev
 sudo .venv/bin/python check_538d_ro.py
 ```
 
-## 12. Contenu du dépôt
+## 13. Contenu du dépôt
 
 | Chemin | Rôle |
 |---|---|
 | `check_538d_ro.py` | état du capteur en lecture seule, à côté d'un clone de `goodix-fp-dump` |
 | `patches/libfprint-infinytum/` | premières corrections sur `infinytum/libfprint` (`unstable`) |
 | `patches/libfprint-sigfm/` | pilote complet et corrections de SIGFM sur `goodix-fp-linux-dev/libfprint` (`sigfm`) |
+| `patches/fprintd/` | enregistrement de l'empreinte après une vérification réussie, sur fprintd 1.94.5 |
+| `tools/install-fprintd-538d.sh` | installation dans `/opt/fprint-538d` et surcharge systemd |
 | `tools/goodix53xd_collect.c` | collecte guidée d'appuis, doigt par doigt |
 | `tools/goodix53xd_dacsweep.c` | images sans doigt pour plusieurs décalages du DAC |
 | `tools/analyze.py`, `tools/sigfm_matrix.cpp` | variantes de traitement d'image évaluées avec libsigfm |

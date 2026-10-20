@@ -1,7 +1,7 @@
 From 75f397f233d270a8141ec826a69a04cc24eccd8b Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 16:41:42 +0200
-Subject: [PATCH 1/8] fp-print: Fix SIGFM serialization buffers release
+Subject: [PATCH 1/9] fp-print: Fix SIGFM serialization buffers release
 
 to_free is a GPtrArray, not a GObject: g_clear_object() raised a critical
 and the buffers returned by sigfm_serialize_binary() were leaked. With
