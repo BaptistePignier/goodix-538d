@@ -55,8 +55,8 @@ def acceptance(scores, genuine, threshold, count, rng, draws=300):
 
 def main():
     paths, labels = load(sys.argv[1])
-    genuine = [i for i, l in enumerate(labels) if l == GENUINE]
-    impostors = [i for i, l in enumerate(labels) if l != GENUINE]
+    genuine = [i for i, label in enumerate(labels) if label == GENUINE]
+    impostors = [i for i, label in enumerate(labels) if label != GENUINE]
     print(f"{len(genuine)} genuine, {len(impostors)} impostor presses")
     print(f"{'config':40s} {'kp med':>6s} {'thr':>5s} {'imp>0':>5s} "
           f"{'K=15':>5s} {'K=25':>5s}")

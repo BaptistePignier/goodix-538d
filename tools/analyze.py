@@ -155,7 +155,8 @@ def main():
     presses = load_dataset(root)
     labels = {p["label"] for p in presses}
     print(f"{len(presses)} presses: " + ", ".join(
-        f"{l} {sum(p['label'] == l for p in presses)}" for l in sorted(labels)))
+        f"{label} {sum(p['label'] == label for p in presses)}"
+        for label in sorted(labels)))
 
     for name in names:
         images = VARIANTS[name](presses)
@@ -164,7 +165,8 @@ def main():
             print(f"\n== {name} x{scale}: keypoints min {keypoints.min()} "
                   f"median {int(np.median(keypoints))}")
             print("  templates | threshold FAR=0 | rejected index | "
-                  "at 24: rejected index, accepted impostors | median index | max impostor")
+                  "at 24: rejected index, accepted impostors | "
+                  "median index | max impostor")
             for count, thr, frr, frr24, far24, med, imax in evaluate(presses, scores):
                 print(f"  {count:9d} | {thr:15d} | {frr:14.0%} | "
                       f"{frr24:21.0%} {far24:19.0%} | {med:12.0f} | {imax:12d}")

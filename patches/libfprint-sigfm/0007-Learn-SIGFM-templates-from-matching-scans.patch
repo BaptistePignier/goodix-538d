@@ -1,7 +1,7 @@
 From d12bd945e1a4a2e962e56b04e5414a7ad016418f Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 18:12:22 +0200
-Subject: [PATCH 7/9] Learn SIGFM templates from matching scans
+Subject: [PATCH 07/10] Learn SIGFM templates from matching scans
 
 Small sensors only see a small part of the finger per image. The Goodix
 Windows engine keeps up to 50 images per template and adds the matching

@@ -61,9 +61,9 @@ def replay(scores, enrolled, usage, learn_threshold, learning=True):
 
 def main():
     paths, labels = load(sys.argv[1])
-    enrolled = [i for i, l in enumerate(labels) if l == "enrol"]
-    usage = [i for i, l in enumerate(labels) if l == "usage"]
-    impostors = [i for i, l in enumerate(labels) if l not in ("enrol", "usage")]
+    enrolled = [i for i, label in enumerate(labels) if label == "enrol"]
+    usage = [i for i, label in enumerate(labels) if label == "usage"]
+    impostors = [i for i, label in enumerate(labels) if label not in ("enrol", "usage")]
     print(f"{len(enrolled)} enrolled, {len(usage)} usage, "
           f"{len(impostors)} impostor presses")
     scores = scores_of(paths)

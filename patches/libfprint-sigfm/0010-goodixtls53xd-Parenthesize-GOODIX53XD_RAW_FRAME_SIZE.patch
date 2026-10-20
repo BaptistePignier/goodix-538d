@@ -1,0 +1,29 @@
+From d9f3ee1426a733b9f68807151f0a71cdf7176ae6 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 19:12:52 +0200
+Subject: [PATCH 10/10] goodixtls53xd: Parenthesize GOODIX53XD_RAW_FRAME_SIZE
+
+Found by clang-tidy (bugprone-macro-parentheses). Its only use, a loop
+bound, was not affected.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/drivers/goodixtls/goodix53xd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.c b/libfprint/drivers/goodixtls/goodix53xd.c
+index 10e1ffb..689ead2 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.c
++++ b/libfprint/drivers/goodixtls/goodix53xd.c
+@@ -49,7 +49,7 @@
+ // For every 4 pixels there are 6 bytes and there are 8 extra start bytes and 5
+ // extra end
+ #define GOODIX53XD_RAW_FRAME_SIZE                                               \
+-    (GOODIX53XD_HEIGHT * GOODIX53XD_SCAN_WIDTH) / 4 * 6
++    ((GOODIX53XD_HEIGHT * GOODIX53XD_SCAN_WIDTH) / 4 * 6)
+ #define GOODIX53XD_CAP_FRAMES 3 // Number of frames averaged per press
+ // Offset added after background subtraction so pixels stay unsigned: the
+ // background extrapolated at the finger DAC goes above 4095
+-- 
+2.53.0
+

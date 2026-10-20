@@ -1,8 +1,8 @@
 From 304b321e1effe5c0985908fc6c36708081221bd9 Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 18:30:03 +0200
-Subject: [PATCH 8/9] Ask for another scan instead of failing on undistinctive
- images
+Subject: [PATCH 08/10] Ask for another scan instead of failing on
+ undistinctive images
 
 On a goodix 27c6:538d, failed matches were not blurry images but images of
 regular parallel ridges: fewer SIFT keypoints, stronger and more coherent

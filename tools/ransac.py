@@ -67,8 +67,8 @@ def main():
             if i != j:
                 scores[i, j] = pair_score(feats[i], feats[j])
 
-    genuine = [i for i, l in enumerate(labels) if l == GENUINE]
-    impostors = [i for i, l in enumerate(labels) if l != GENUINE]
+    genuine = [i for i, label in enumerate(labels) if label == GENUINE]
+    impostors = [i for i, label in enumerate(labels) if label != GENUINE]
     rng = np.random.default_rng(0)
 
     for combine in ("max", "sum"):

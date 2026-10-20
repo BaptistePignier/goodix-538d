@@ -1,7 +1,8 @@
 From d28820b25a68aa827f6753fb9facbd7ea6edf61b Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 17:27:58 +0200
-Subject: [PATCH 3/9] sigfm: Fix match deduplication and loosen the ratio test
+Subject: [PATCH 03/10] sigfm: Fix match deduplication and loosen the ratio
+ test
 
 match::operator< only compared p1.y (its second clause can never be true),
 so the std::set of matches kept a single match per row of the verified

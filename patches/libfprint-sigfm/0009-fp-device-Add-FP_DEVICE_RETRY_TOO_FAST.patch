@@ -1,7 +1,7 @@
 From d2a29e2d6836c0c83631b6f23d43c47cfb75c749 Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 18:39:32 +0200
-Subject: [PATCH 9/9] fp-device: Add FP_DEVICE_RETRY_TOO_FAST
+Subject: [PATCH 09/10] fp-device: Add FP_DEVICE_RETRY_TOO_FAST
 
 Added upstream after 1.94.5 and used by fprintd 1.94.5, which this fork
 is meant to be used with. Appended to keep the existing values.

@@ -33,7 +33,8 @@ def raw_signal(image_path):
 
 
 def contact(image_path):
-    info = open(image_path[: -len("image.pgm")] + "info.txt").read()
+    with open(image_path[: -len("image.pgm")] + "info.txt") as f:
+        info = f.read()
     return int(info.split("delta=")[1].split()[0])
 
 
@@ -87,8 +88,8 @@ def auc(values, positive):
 
 def main():
     paths, labels = learning.load(sys.argv[1])
-    enrolled = [i for i, l in enumerate(labels) if l == "enrol"]
-    usage = [i for i, l in enumerate(labels) if l == "usage"]
+    enrolled = [i for i, label in enumerate(labels) if label == "enrol"]
+    usage = [i for i, label in enumerate(labels) if label == "usage"]
     scores = learning.scores_of(paths)
     matched, _ = learning.replay(scores, enrolled, usage,
                                  learning.MATCH_THRESHOLD)
