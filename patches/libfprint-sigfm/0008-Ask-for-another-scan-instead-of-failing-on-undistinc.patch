@@ -1,0 +1,226 @@
+From 304b321e1effe5c0985908fc6c36708081221bd9 Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 18:30:03 +0200
+Subject: [PATCH 8/8] Ask for another scan instead of failing on undistinctive
+ images
+
+On a goodix 27c6:538d, failed matches were not blurry images but images of
+regular parallel ridges: fewer SIFT keypoints, stronger and more coherent
+signal. Asking for another scan does not use up a verify attempt.
+
+- Image devices can set sigfm_min_keypoints: a SIGFM scan with fewer
+  keypoints is reported as FP_DEVICE_RETRY_CENTER_FINGER.
+- goodixtls53xd sets it to 33, and during verify and identify asks for
+  another scan when the background subtracted signal is stronger than 230
+  ($GOODIX53XD_MAX_AMPLITUDE), enrollment keeping those scans.
+
+Offline on 60 natural presses replayed with template learning, this turns
+12 of the 22 failed matches into retries while asking 1 of the 38 matching
+presses again; the matches among answered presses go from 63% to 77%.
+Thresholds chosen on one half of the presses hold on the other half.
+
+Also initialize the verify result, which a non NBIS/SIGFM algorithm left
+unset.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libfprint/drivers/goodixtls/goodix53xd.c | 78 ++++++++++++++++++++----
+ libfprint/fpi-image-device.c             | 19 +++++-
+ libfprint/fpi-image-device.h             |  1 +
+ 3 files changed, 85 insertions(+), 13 deletions(-)
+
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.c b/libfprint/drivers/goodixtls/goodix53xd.c
+index 26e1d11..10e1ffb 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.c
++++ b/libfprint/drivers/goodixtls/goodix53xd.c
+@@ -79,6 +79,11 @@
+ // Each image only covers a small part of the finger
+ #define GOODIX53XD_ENROLL_STAGES 20
+ #define GOODIX53XD_TEMPLATE_MAX 50
++// Verify scans with fewer SIFT keypoints, or a stronger signal, are asked
++// again: offline they caught half of the failed matches and almost no
++// matching scan. $GOODIX53XD_MAX_AMPLITUDE overrides the amplitude.
++#define GOODIX53XD_MIN_KEYPOINTS 33
++#define GOODIX53XD_MAX_AMPLITUDE 230
+ #define GOODIX53XD_ACTIVATE_ATTEMPTS 3
+ #define GOODIX53XD_ACTIVATE_RETRY_DELAY 200 // ms
+ // Stale replies dropped when opening, see drain_input()
+@@ -124,6 +129,8 @@ struct _FpiDeviceGoodixTls53XD {
+   guint background_frames;
+   guint finger_threshold;
+   guint min_contact;
++  guint max_amplitude;
++  guint last_amplitude;
+   guint last_delta;
+   guint settle_polls;
+ 
+@@ -573,6 +580,40 @@ static void postprocess_frame(Goodix53xdPix frame[GOODIX53XD_FRAME_SIZE],
+     }
+ }
+ 
++static gboolean in_image(int i)
++{
++    const int x = i % GOODIX53XD_WIDTH;
++    const int y = i / GOODIX53XD_WIDTH;
++
++    return x >= GOODIX53XD_BORDER && x < GOODIX53XD_WIDTH - GOODIX53XD_BORDER &&
++           y >= GOODIX53XD_BORDER && y < GOODIX53XD_HEIGHT - GOODIX53XD_BORDER;
++}
++
++/**
++ * @brief Standard deviation of the background subtracted signal, in the
++ * cropped image
++ *
++ * @param frame postprocessed frame
++ */
++static guint signal_amplitude(const Goodix53xdPix frame[GOODIX53XD_FRAME_SIZE])
++{
++    double sum = 0;
++    double sum_sq = 0;
++    guint count = 0;
++
++    for (int i = 0; i != GOODIX53XD_FRAME_SIZE; ++i) {
++        if (!in_image(i)) {
++            continue;
++        }
++        sum += frame[i];
++        sum_sq += (double) frame[i] * frame[i];
++        count++;
++    }
++
++    const double mean = sum / count;
++    return (guint) sqrt(MAX(sum_sq / count - mean * mean, 0));
++}
++
+ /**
+  * @brief Averages the captured frames of a single press into one frame
+  *
+@@ -720,22 +761,14 @@ static void dump_press(FpiDeviceGoodixTls53XD* self, FpImage* img)
+ 
+     g_autofree gchar* info_path = dump_path(self, "info.txt");
+     g_autofree gchar* info = g_strdup_printf(
+-        "delta=%u\nsettle_polls=%u\nfinger_threshold=%u\n", self->last_delta,
+-        self->settle_polls, self->finger_threshold);
++        "delta=%u\nsettle_polls=%u\nfinger_threshold=%u\namplitude=%u\n",
++        self->last_delta, self->settle_polls, self->finger_threshold,
++        self->last_amplitude);
+     dump_file(info_path, info, NULL, 0);
+ 
+     self->dump_press++;
+ }
+ 
+-static gboolean in_image(int i)
+-{
+-    const int x = i % GOODIX53XD_WIDTH;
+-    const int y = i / GOODIX53XD_WIDTH;
+-
+-    return x >= GOODIX53XD_BORDER && x < GOODIX53XD_WIDTH - GOODIX53XD_BORDER &&
+-           y >= GOODIX53XD_BORDER && y < GOODIX53XD_HEIGHT - GOODIX53XD_BORDER;
+-}
+-
+ /**
+  * @brief Background at the finger DAC from the two calibration frames
+  * @details The DAC shifts every pixel linearly, so the value at the finger
+@@ -934,6 +967,7 @@ static void scan_on_read_img(FpDevice* dev, guint8* data, guint16 len,
+ 
+         average_frames(self->frames, averaged);
+         postprocess_frame(averaged, self->empty_img);
++        self->last_amplitude = signal_amplitude(averaged);
+ 
+         FpImage* img = fp_image_new(GOODIX53XD_IMG_WIDTH, GOODIX53XD_IMG_HEIGHT);
+         squash_frame_rows(averaged, img->data);
+@@ -942,7 +976,21 @@ static void scan_on_read_img(FpDevice* dev, guint8* data, guint16 len,
+         g_slist_free_full(self->frames, g_free);
+         self->frames = NULL;
+ 
+-        fpi_image_device_image_captured(img_dev, img);
++        // Offline, the strongest signals (hard press, or regular ridges of
++        // the finger center) failed to match half of the time. Enrollment
++        // keeps them, not to bias the template.
++        const FpiDeviceAction action = fpi_device_get_current_action(dev);
++        if ((action == FPI_DEVICE_ACTION_VERIFY ||
++             action == FPI_DEVICE_ACTION_IDENTIFY) &&
++            self->last_amplitude > self->max_amplitude) {
++            fp_dbg("Signal amplitude %u > %u, asking for another scan",
++                   self->last_amplitude, self->max_amplitude);
++            g_object_unref(img);
++            fpi_image_device_retry_scan(img_dev, FP_DEVICE_RETRY_REMOVE_FINGER);
++        }
++        else {
++            fpi_image_device_image_captured(img_dev, img);
++        }
+ 
+         self->capture_mode = GOODIX53XD_CAPTURE_WAIT_FINGER_OFF;
+         self->dac_offset = self->finger_dac_offset + GOODIX53XD_DETECT_DAC_STEP;
+@@ -1229,6 +1277,11 @@ static void fpi_device_goodixtls53xd_init(FpiDeviceGoodixTls53XD* self)
+                             ? (guint) g_ascii_strtoull(min_contact, NULL, 10)
+                             : GOODIX53XD_MIN_CONTACT_DELTA;
+ 
++    const gchar* max_amplitude = g_getenv("GOODIX53XD_MAX_AMPLITUDE");
++    self->max_amplitude = max_amplitude != NULL
++                              ? (guint) g_ascii_strtoull(max_amplitude, NULL, 10)
++                              : GOODIX53XD_MAX_AMPLITUDE;
++
+ }
+ 
+ static void fpi_device_goodixtls53xd_class_init(
+@@ -1259,6 +1312,7 @@ static void fpi_device_goodixtls53xd_class_init(
+   // Like the Goodix Windows engine: the template keeps up to 50 images,
+   // matching scans being added to it
+   img_dev_class->sigfm_learn_max = GOODIX53XD_TEMPLATE_MAX;
++  img_dev_class->sigfm_min_keypoints = GOODIX53XD_MIN_KEYPOINTS;
+   // SIGFM score threshold. Offline, impostors never scored above 3 once the
+   // fixed pattern of the sensor is removed by the calibration
+   img_dev_class->bz3_threshold = 10;
+diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
+index ebe814c..04cda3e 100644
+--- a/libfprint/fpi-image-device.c
++++ b/libfprint/fpi-image-device.c
+@@ -285,6 +285,23 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+ 
+   action = fpi_device_get_current_action (device);
+ 
++  /* On small sensors, an image of regular parallel ridges has few SIFT
++   * keypoints and nothing distinctive to match: ask for another scan
++   * rather than failing the match. */
++  if (!error && action != FPI_DEVICE_ACTION_CAPTURE &&
++      priv->algorithm == FPI_PRINT_SIGFM)
++    {
++      FpImageDeviceClass *cls = FP_IMAGE_DEVICE_GET_CLASS (self);
++      int keypoints = sigfm_keypoints_count (fp_image_get_sigfm_info (image));
++
++      if (keypoints < cls->sigfm_min_keypoints)
++        {
++          fp_dbg ("Only %d keypoints, asking for another scan", keypoints);
++          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_CENTER_FINGER,
++                                            "Not enough details, move your finger");
++        }
++    }
++
+   if (action == FPI_DEVICE_ACTION_CAPTURE)
+     {
+       priv->capture_image = g_steal_pointer (&image);
+@@ -338,7 +355,7 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+   else if (action == FPI_DEVICE_ACTION_VERIFY)
+     {
+       FpPrint *template;
+-      FpiMatchResult result;
++      FpiMatchResult result = FPI_MATCH_ERROR;
+ 
+       fpi_device_get_verify_data (device, &template);
+       if (print)
+diff --git a/libfprint/fpi-image-device.h b/libfprint/fpi-image-device.h
+index 629adee..3147a71 100644
+--- a/libfprint/fpi-image-device.h
++++ b/libfprint/fpi-image-device.h
+@@ -115,6 +115,7 @@ struct _FpImageDeviceClass
+   gint                    img_height;
+   FpiImageDeviceAlgorithm algorithm;
+   guint                   sigfm_learn_max;
++  gint                    sigfm_min_keypoints;
+ 
+   void                    (*img_open)     (FpImageDevice *dev);
+   void                    (*img_close)    (FpImageDevice *dev);
+-- 
+2.53.0
+

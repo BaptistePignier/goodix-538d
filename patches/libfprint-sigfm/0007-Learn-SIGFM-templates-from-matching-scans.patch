@@ -1,0 +1,187 @@
+From d12bd945e1a4a2e962e56b04e5414a7ad016418f Mon Sep 17 00:00:00 2001
+From: Baptiste Pignier <pignier.baptiste@tutanota.com>
+Date: Tue, 20 Oct 2026 18:12:22 +0200
+Subject: [PATCH 7/8] Learn SIGFM templates from matching scans
+
+Small sensors only see a small part of the finger per image. The Goodix
+Windows engine keeps up to 50 images per template and adds the matching
+scans to it (gx_templateStudy in its logs).
+
+Add fpi_print_sigfm_learn() and a sigfm_learn_max image device class
+setting: when a SIGFM verify or identify matches, the scan is added to the
+matched template, replacing the oldest learned image above the limit, the
+enrolled images being kept. The caller saves the template to keep it: the
+verify example now does.
+
+goodixtls53xd enables it with 50 images. Offline, on 60 natural presses
+of a 27c6:538d replayed in order, recognition goes from 28% to 63% (90%
+within 3 attempts), and 40 impostor presses never score above 1 against
+the grown template, the threshold being 10.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ examples/verify.c                        |  4 +++
+ libfprint/drivers/goodixtls/goodix53xd.c |  4 +++
+ libfprint/fpi-image-device.c             | 22 +++++++++++++++++
+ libfprint/fpi-image-device.h             |  1 +
+ libfprint/fpi-print.c                    | 31 ++++++++++++++++++++++++
+ libfprint/fpi-print.h                    |  5 ++++
+ 6 files changed, 67 insertions(+)
+
+diff --git a/examples/verify.c b/examples/verify.c
+index 6892ef0..e32d4a4 100644
+--- a/examples/verify.c
++++ b/examples/verify.c
+@@ -135,6 +135,10 @@ on_match_cb (FpDevice *dev, FpPrint *match, FpPrint *print,
+ 
+       verify_data->ret_value = EXIT_SUCCESS;
+ 
++      /* Drivers learning from matches add the scan to the template */
++      if (print_data_save (match, verify_data->finger, FALSE) < 0)
++        g_warning ("Failed to save the updated print");
++
+       if (date && g_date_valid (date))
+         g_date_strftime (date_str, G_N_ELEMENTS (date_str), "%Y-%m-%d\0",
+                          fp_print_get_enroll_date (match));
+diff --git a/libfprint/drivers/goodixtls/goodix53xd.c b/libfprint/drivers/goodixtls/goodix53xd.c
+index d382639..26e1d11 100644
+--- a/libfprint/drivers/goodixtls/goodix53xd.c
++++ b/libfprint/drivers/goodixtls/goodix53xd.c
+@@ -78,6 +78,7 @@
+ #define GOODIX53XD_MIN_CONTACT_DELTA 1900 // $GOODIX53XD_MIN_CONTACT overrides
+ // Each image only covers a small part of the finger
+ #define GOODIX53XD_ENROLL_STAGES 20
++#define GOODIX53XD_TEMPLATE_MAX 50
+ #define GOODIX53XD_ACTIVATE_ATTEMPTS 3
+ #define GOODIX53XD_ACTIVATE_RETRY_DELAY 200 // ms
+ // Stale replies dropped when opening, see drain_input()
+@@ -1255,6 +1256,9 @@ static void fpi_device_goodixtls53xd_class_init(
+   // NBIS finds 1 or 2 minutiae on the small 53xd images, SIGFM matches
+   // SIFT keypoints instead
+   img_dev_class->algorithm = FPI_DEVICE_ALGO_SIGFM;
++  // Like the Goodix Windows engine: the template keeps up to 50 images,
++  // matching scans being added to it
++  img_dev_class->sigfm_learn_max = GOODIX53XD_TEMPLATE_MAX;
+   // SIGFM score threshold. Offline, impostors never scored above 3 once the
+   // fixed pattern of the sensor is removed by the calibration
+   img_dev_class->bz3_threshold = 10;
+diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
+index 57924df..ebe814c 100644
+--- a/libfprint/fpi-image-device.c
++++ b/libfprint/fpi-image-device.c
+@@ -233,6 +233,24 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
+     }
+ }
+ 
++/* Template learning, enabled by the driver with sigfm_learn_max: the matched
++ * template gets the new image, the caller saves the template if it wants to
++ * keep it. The enrolled images are never replaced. */
++static void
++fp_image_device_maybe_learn (FpImageDevice *self, FpPrint *template, FpPrint *print)
++{
++  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
++  FpImageDeviceClass *cls = FP_IMAGE_DEVICE_GET_CLASS (self);
++
++  if (priv->algorithm != FPI_PRINT_SIGFM || cls->sigfm_learn_max == 0)
++    return;
++
++  fpi_print_sigfm_learn (template, print,
++                         fp_device_get_nr_enroll_stages (FP_DEVICE (self)),
++                         cls->sigfm_learn_max);
++  fp_dbg ("Learned the matching image");
++}
++
+ static void
+ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, gpointer user_data)
+ {
+@@ -331,6 +349,9 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+           else if (priv->algorithm == FPI_PRINT_SIGFM)
+             result = fpi_print_sigfm_match (template, print, priv->bz3_threshold,
+                                           &error);
++
++          if (result == FPI_MATCH_SUCCESS)
++            fp_image_device_maybe_learn (self, template, print);
+         }
+       else
+         {
+@@ -363,6 +384,7 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+ 
+           if (match_result == FPI_MATCH_SUCCESS)
+             {
++              fp_image_device_maybe_learn (self, template, print);
+               result = template;
+               break;
+             }
+diff --git a/libfprint/fpi-image-device.h b/libfprint/fpi-image-device.h
+index 2cb615a..629adee 100644
+--- a/libfprint/fpi-image-device.h
++++ b/libfprint/fpi-image-device.h
+@@ -114,6 +114,7 @@ struct _FpImageDeviceClass
+   gint                    img_width;
+   gint                    img_height;
+   FpiImageDeviceAlgorithm algorithm;
++  guint                   sigfm_learn_max;
+ 
+   void                    (*img_open)     (FpImageDevice *dev);
+   void                    (*img_close)    (FpImageDevice *dev);
+diff --git a/libfprint/fpi-print.c b/libfprint/fpi-print.c
+index 4368b82..a037c8b 100644
+--- a/libfprint/fpi-print.c
++++ b/libfprint/fpi-print.c
+@@ -63,6 +63,37 @@ fpi_print_add_print (FpPrint *print, FpPrint *add)
+   g_ptr_array_add (print->prints, to_add);
+ }
+ 
++/**
++ * fpi_print_sigfm_learn:
++ * @template: The #FPI_PRINT_SIGFM template that @print matched
++ * @print: The single image #FPI_PRINT_SIGFM print that matched
++ * @protected_count: Number of first images of @template never replaced,
++ *   the enrolled ones
++ * @max_prints: Maximum number of images of @template
++ *
++ * Adds the image of a matching scan to the template, like the template
++ * learning of the Goodix Windows engine: on small sensors, each image only
++ * covers a small part of the finger and the template keeps growing over
++ * the matches. Above @max_prints, the oldest learned image is replaced.
++ */
++void
++fpi_print_sigfm_learn (FpPrint *template, FpPrint *print,
++                       guint protected_count, guint max_prints)
++{
++  g_return_if_fail (template->type == FPI_PRINT_SIGFM);
++  g_return_if_fail (print->type == FPI_PRINT_SIGFM);
++  g_return_if_fail (print->prints->len == 1);
++
++  while (template->prints->len >= max_prints &&
++         template->prints->len > protected_count)
++    g_ptr_array_remove_index (template->prints, protected_count);
++
++  if (template->prints->len >= max_prints)
++    return;
++
++  g_ptr_array_add (template->prints, sigfm_copy_info (print->prints->pdata[0]));
++}
++
+ /**
+  * fpi_print_set_type:
+  * @print: A #FpPrint
+diff --git a/libfprint/fpi-print.h b/libfprint/fpi-print.h
+index 6d34d55..1a4aaa1 100644
+--- a/libfprint/fpi-print.h
++++ b/libfprint/fpi-print.h
+@@ -32,6 +32,11 @@ typedef enum {
+   FPI_MATCH_SUCCESS,
+ } FpiMatchResult;
+ 
++void     fpi_print_sigfm_learn (FpPrint *template,
++                                FpPrint *print,
++                                guint    protected_count,
++                                guint    max_prints);
++
+ void     fpi_print_add_print (FpPrint *print,
+                               FpPrint *add);
+ 
+-- 
+2.53.0
+

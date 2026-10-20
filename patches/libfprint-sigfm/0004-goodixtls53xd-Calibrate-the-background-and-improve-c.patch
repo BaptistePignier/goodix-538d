@@ -1,7 +1,7 @@
 From a91e22377f9e42b6daecc719ab1cf355b49c12e2 Mon Sep 17 00:00:00 2001
 From: Baptiste Pignier <pignier.baptiste@tutanota.com>
 Date: Tue, 20 Oct 2026 17:27:58 +0200
-Subject: [PATCH 4/6] goodixtls53xd: Calibrate the background and improve
+Subject: [PATCH 4/8] goodixtls53xd: Calibrate the background and improve
  captures
 
 - With the OTP DAC values the finger-free sensor saturates at 4095, so the

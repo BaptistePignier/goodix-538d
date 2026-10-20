@@ -4,19 +4,20 @@ Compte rendu d'une tentative pour faire fonctionner le lecteur d'empreintes
 Goodix `27c6:538d` d'un Dell Inspiron 3501 sous Ubuntu 26.04, sans Windows.
 
 **Conclusion.** Le pilote libfprint corrigé ici communique de façon stable
-avec le capteur, le calibre correctement, détecte le doigt, capture des images
-nettes et enregistre une empreinte. **Aucun doigt étranger n'a été accepté**
-sur 40 appuis testés depuis la calibration. En revanche, seuls **25 à 35 % des appuis naturels du
-bon doigt sont reconnus** : ce n'est pas utilisable au quotidien.
+avec le capteur, le calibre correctement, détecte le doigt et capture des
+images nettes. Avec **l'apprentissage de l'empreinte** (section 9), comme le
+moteur Goodix de Windows, **84 à 85 % des appuis naturels sont reconnus**
+après une vingtaine d'utilisations, et **aucun doigt étranger n'a été
+accepté** (0 sur 40 appuis réels, 0 sur 80 hors ligne). Ces mesures viennent
+de séances de quelques heures : seul un usage sur plusieurs jours dira si
+elles tiennent.
 
-La limite vient de l'information contenue dans chaque image : le capteur ne
-voit que 4 ou 5 crêtes presque parallèles. Sur un tel motif, la position
+Sans apprentissage, seuls 25 à 35 % des appuis étaient reconnus. Le capteur
+ne voit que 4 ou 5 crêtes presque parallèles : sur un tel motif, la position
 d'une image par rapport à une autre est indéterminée (le « problème
-d'ouverture » du recalage d'images). Toutes les méthodes essayées
-(minuties, points SIFT, corrélation, RANSAC, mosaïque) butent sur ce plafond.
-
-Pour un usage réel, un lecteur USB pris en charge par libfprint reste la
-seule solution fiable.
+d'ouverture » du recalage d'images). Toutes les méthodes de comparaison
+essayées butent sur ce plafond ; c'est l'accumulation d'images au fil des
+utilisations qui le contourne.
 
 ## Sommaire
 
@@ -28,9 +29,10 @@ seule solution fiable.
 6. [Calibration du capteur](#6-calibration-du-capteur)
 7. [Captures, robustesse et enregistrement](#7-captures-robustesse-et-enregistrement)
 8. [Comparaison des empreintes](#8-comparaison-des-empreintes)
-9. [Résultats](#9-résultats)
-10. [Reproduire](#10-reproduire)
-11. [Contenu du dépôt](#11-contenu-du-dépôt)
+9. [Apprentissage de l'empreinte](#9-apprentissage-de-lempreinte)
+10. [Résultats](#10-résultats)
+11. [Reproduire](#11-reproduire)
+12. [Contenu du dépôt](#12-contenu-du-dépôt)
 
 ## 1. Audit de `run_538d.py`
 
@@ -203,9 +205,35 @@ les outils de [`tools/`](tools) :
 | SIFT + RANSAC (rotation et translation, nombre de points cohérents) | 25 à 35 % comme SIGFM, mais marge face aux doigts étrangers de 1 ou 2 points seulement : non retenu |
 | Mosaïque : assembler les images d'enregistrement | impossible : deux appuis consécutifs, à peine décalés, ne se recalent pas (corrélation 0,20 contre 0,15 entre doigts différents) |
 
-## 9. Résultats
+## 9. Apprentissage de l'empreinte
 
-Trois séries d'appuis ont été collectées
+Les journaux du pilote Windows capturés par la communauté
+([`goodix-fp-dump/log/ENGINE.log`](https://github.com/goodix-fp-linux-dev/goodix-fp-dump/tree/master/log),
+moteur Goodix « Milan », capteur 5110 de même résolution) montrent comment
+Windows s'en sort :
+
+| Moteur Goodix (Windows) | Ce dépôt |
+|---|---|
+| Empreinte de 50 images au plus (`maxTempNum:50`) | 50 images |
+| Chaque reconnaissance réussie ajoute l'image à l'empreinte (`gx_templateStudy`) | idem, `fpi_print_sigfm_learn()` |
+| Seuils de qualité (25) et de couverture (65 %) | nouvel essai demandé pour les images peu distinctives |
+| Calibration du gain et du décalage par pixel (`kr[]`, `b[]`) | décalage seulement |
+
+**Apprentissage.** Quand une vérification réussit, l'image rejoint
+l'empreinte ; au-delà de 50 images, la plus ancienne image apprise est
+remplacée, les 20 images d'enregistrement restent. L'appelant enregistre
+l'empreinte enrichie (l'exemple `verify` le fait ; fprintd doit être modifié).
+
+**Nouvel essai plutôt qu'échec.** Les appuis ratés ne sont pas des images
+floues mais des crêtes parallèles très régulières : moins de points SIFT,
+signal plus fort et plus cohérent ([`tools/quality.py`](tools/quality.py)).
+Le pilote demande de reposer le doigt quand une image a moins de 33 points
+SIFT, ou, en vérification, quand son signal dépasse 230. Une demande de
+nouvel appui ne consomme pas d'essai dans fprintd.
+
+## 10. Résultats
+
+Cinq séries d'appuis ont été collectées
 ([`goodix53xd_collect`](tools/goodix53xd_collect.c)), puis effacées après
 l'analyse.
 
@@ -233,11 +261,32 @@ doigts) :
 | SIFT + RANSAC | 6 | 4 | 25 % |
 | SIFT + RANSAC | 5 | 4 | 35 % |
 
-Pour aller plus loin, il faudrait observer le pilote Windows (échanges USB
-dans une machine virtuelle) pour connaître ses réglages de capture ; son
-algorithme de comparaison reste propriétaire.
+**Apprentissage, simulation hors ligne**
+([`tools/learning.py`](tools/learning.py) : 20 images d'enregistrement,
+60 appuis naturels rejoués dans l'ordre, 40 appuis d'autres doigts) :
 
-## 10. Reproduire
+| | Sans apprentissage | Avec apprentissage |
+|---|---|---|
+| Appuis reconnus | 28 % | 63 % |
+| Déverrouillage en 3 essais au plus | — | 90 % |
+| Doigts étrangers, meilleur score (seuil 10) | 1 | 1 |
+
+Les demandes de nouvel essai transforment 12 des 22 échecs en « repose ton
+doigt » en ne redemandant qu'un appui reconnu sur 38 : 77 % des appuis
+auxquels le pilote répond sont reconnus.
+
+**Apprentissage, conditions réelles** (`enroll` puis `verify` en boucle) :
+
+| Série | Index droit reconnu | Autres doigts acceptés |
+|---|---|---|
+| Juste après l'enregistrement | 34/40 (85 %) : 5/10, 9/10, 10/10, 10/10 | 0/30 |
+| Une heure plus tard, avec les nouveaux essais | 26/31 (84 %), 2 nouveaux essais | 0/10 |
+
+Pour aller plus loin : un usage sur plusieurs jours, la calibration du gain
+par pixel, ou l'observation du pilote Windows (journaux et échanges USB
+dans une machine virtuelle) pour connaître ses réglages de capture.
+
+## 11. Reproduire
 
 Dépendances (Ubuntu 26.04) : `meson`, `ninja-build`, `gcc`, `libglib2.0-dev`,
 `libgusb-dev`, `libssl-dev`, `libopencv-dev`, `doctest-dev`.
@@ -249,7 +298,7 @@ meson setup build -Ddrivers=goodixtls53xd -Dintrospection=false -Ddoc=false \
     -Dgtk-examples=false -Dudev_rules=disabled -Dudev_hwdb=disabled
 ninja -C build
 sudo G_MESSAGES_DEBUG=none build/examples/enroll   # 20 appuis
-sudo G_MESSAGES_DEBUG=none build/examples/verify
+(echo 6; yes) | sudo G_MESSAGES_DEBUG=none build/examples/verify 2>&1 | grep -E "MATCH!|retry error"
 ```
 
 Les exemples utilisent la bibliothèque compilée, sans toucher à la libfprint
@@ -272,7 +321,7 @@ python3 -m venv .venv && .venv/bin/pip install pyusb python-periphery spidev
 sudo .venv/bin/python check_538d_ro.py
 ```
 
-## 11. Contenu du dépôt
+## 12. Contenu du dépôt
 
 | Chemin | Rôle |
 |---|---|
@@ -284,11 +333,13 @@ sudo .venv/bin/python check_538d_ro.py
 | `tools/analyze.py`, `tools/sigfm_matrix.cpp` | variantes de traitement d'image évaluées avec libsigfm |
 | `tools/sigfm_tune.cpp`, `tools/tune.py` | SIGFM aux paramètres réglables, et balayage |
 | `tools/correlation.py`, `tools/ransac.py` | prototypes de comparaison par corrélation et par SIFT + RANSAC |
+| `tools/learning.py` | simulation de l'apprentissage de l'empreinte |
+| `tools/quality.py` | indicateurs de qualité des appuis ratés |
 | `tools/sigfm_bench.cpp` | premier banc de test SIGFM |
 
 Les deux branches du pilote sont publiées dans
 [BaptistePignier/libfprint](https://github.com/BaptistePignier/libfprint) :
-`goodix53xd-infinytum` (section 4) et `goodix53xd-sigfm` (sections 5 à 7).
+`goodix53xd-infinytum` (section 4) et `goodix53xd-sigfm` (sections 5 à 9).
 
 Aucune donnée biométrique n'est incluse. libfprint est sous LGPL 2.1,
 goodix-fp-dump sous licence MIT ; le firmware Goodix n'est pas redistribué ici.
